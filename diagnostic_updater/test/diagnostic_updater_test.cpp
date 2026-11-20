@@ -36,6 +36,7 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
 
 #include "diagnostic_updater/diagnostic_status_wrapper.hpp"
@@ -168,6 +169,90 @@ TEST(DiagnosticUpdater, testCustomContext) {
   updater.force_update();
   ASSERT_TRUE(save_if_called.has_been_called());
   context->shutdown("End test");
+}
+
+// Creates a task that increments `counter` every time it is run. The task owns
+// a copy of the shared_ptr, which makes the lifetime of the task observable.
+static diagnostic_updater::FunctionDiagnosticTask makeCountingTask(
+  const std::string & name, const std::shared_ptr<int> & counter)
+{
+  return diagnostic_updater::FunctionDiagnosticTask(
+    name, [counter](diagnostic_updater::DiagnosticStatusWrapper & stat) {
+      stat.summary(0, "OK");
+      ++(*counter);
+    });
+}
+
+class FunctionTaskOwnership : public ::testing::Test
+{
+protected:
+  void SetUp() override
+  {
+    context_ = std::make_shared<rclcpp::Context>();
+    context_->init(0, nullptr, rclcpp::InitOptions());
+    node_ = std::make_shared<rclcpp::Node>(
+      "OwnershipNode", rclcpp::NodeOptions().context(context_));
+    updater_ = std::make_unique<diagnostic_updater::Updater>(node_);
+  }
+
+  void TearDown() override
+  {
+    updater_.reset();
+    node_.reset();
+    context_->shutdown("End test");
+  }
+
+  std::shared_ptr<rclcpp::Context> context_;
+  std::shared_ptr<rclcpp::Node> node_;
+  std::unique_ptr<diagnostic_updater::Updater> updater_;
+};
+
+TEST_F(FunctionTaskOwnership, lvalueTaskIsReferencedNotOwned) {
+  auto counter = std::make_shared<int>(0);
+  auto task = makeCountingTask("lvalue", counter);
+  const long use_count_before = counter.use_count();  // NOLINT(runtime/int)
+
+  updater_->add(task);
+
+  // The lvalue overload must not copy or take ownership of the task
+  EXPECT_EQ(use_count_before, counter.use_count());
+  updater_->force_update();
+  EXPECT_EQ(1, *counter);
+}
+
+TEST_F(FunctionTaskOwnership, rvalueTaskOutlivesCallerScope) {
+  auto counter = std::make_shared<int>(0);
+  {
+    auto moved = makeCountingTask("moved", counter);
+    updater_->add(std::move(moved));
+    updater_->add(makeCountingTask("temporary", counter));
+  }
+
+  // Both tasks went out of scope and must still be callable
+  updater_->force_update();
+  EXPECT_EQ(2, *counter);
+}
+
+TEST_F(FunctionTaskOwnership, ownedTaskIsDestroyedOnRemoval) {
+  std::weak_ptr<int> observer;
+  {
+    auto counter = std::make_shared<int>(0);
+    observer = counter;
+    updater_->add(makeCountingTask("owned", counter));
+  }
+
+  // The updater is now the only owner of the task and its captured state
+  ASSERT_FALSE(observer.expired());
+  updater_->force_update();
+  ASSERT_FALSE(observer.expired());
+  EXPECT_EQ(1, *observer.lock());
+
+  EXPECT_TRUE(updater_->removeByName("owned"));
+  EXPECT_TRUE(observer.expired());
+  EXPECT_FALSE(updater_->removeByName("owned"));
+
+  // Running the updater without any task left must not touch the removed one
+  updater_->force_update();
 }
 
 TEST(DiagnosticUpdater, testDiagnosticStatusWrapperKeyValuePairs) {

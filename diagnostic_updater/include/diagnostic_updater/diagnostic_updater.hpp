@@ -39,6 +39,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "builtin_interfaces/msg/time.hpp"
@@ -271,6 +272,23 @@ public:
   {
     TaskFunction f = std::bind(&DiagnosticTask::run, &task, std::placeholders::_1);
     add(task.getName(), f);
+  }
+
+  /**
+   * \brief Add a temporary FunctionDiagnosticTask to the DiagnosticTaskVector,
+   * storing an owned copy of the task.
+   *
+   * Unlike add(DiagnosticTask &), the registered task does not need to outlive
+   * the caller's scope. The DiagnosticTaskVector keeps the copy alive until it
+   * is removed (see removeByName()) or the DiagnosticTaskVector is destructed.
+   *
+   * \param task The FunctionDiagnosticTask to be added, typically a temporary
+   * or the result of std::move().
+   */
+  void add(FunctionDiagnosticTask && task)
+  {
+    auto owned = std::make_shared<FunctionDiagnosticTask>(std::move(task));
+    add(owned->getName(), [owned](DiagnosticStatusWrapper & stat) {owned->run(stat);});
   }
 
   /**
